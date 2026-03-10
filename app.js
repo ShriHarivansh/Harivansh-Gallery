@@ -1,398 +1,311 @@
 'use strict';
 
-// ── CONSTANTS ──────────────────────────────────────────────────────────────
 const PROFILE_KEY = 'h_profile';
 const POSTS_KEY   = 'h_posts';
 const MAX_CHARS   = 500;
+const MAX_IMG_PX  = 1200;
+const IMG_QUALITY = 0.82;
+const MAX_POSTS   = 500;
 
-// ── STATE ──────────────────────────────────────────────────────────────────
-let profile = null;
-let posts   = [];
-let composerImage = null;
-let activeMenu = null;
+let profile = null, posts = [], composerImage = null, activeMenu = null;
 
 // ── STORAGE ────────────────────────────────────────────────────────────────
 const store = {
-  getProfile: () => JSON.parse(localStorage.getItem(PROFILE_KEY) || 'null'),
-  setProfile: p  => localStorage.setItem(PROFILE_KEY, JSON.stringify(p)),
-  getPosts:   () => JSON.parse(localStorage.getItem(POSTS_KEY)   || '[]'),
-  setPosts:   a  => localStorage.setItem(POSTS_KEY,   JSON.stringify(a)),
+  getProfile() { try { return JSON.parse(localStorage.getItem(PROFILE_KEY)||'null'); } catch { return null; } },
+  setProfile(p) { try { localStorage.setItem(PROFILE_KEY,JSON.stringify(p)); return true; } catch { showToast('Storage full'); return false; } },
+  getPosts() { try { return JSON.parse(localStorage.getItem(POSTS_KEY)||'[]'); } catch { return []; } },
+  setPosts(arr) {
+    try { localStorage.setItem(POSTS_KEY,JSON.stringify(arr)); return true; }
+    catch {
+      const copy = arr.slice();
+      for (let i = copy.length-1; i >= 0; i--) {
+        if (copy[i].image) { copy[i].image = null; try { localStorage.setItem(POSTS_KEY,JSON.stringify(copy)); showToast('Storage full — some images removed'); return true; } catch {} }
+      }
+      return false;
+    }
+  }
 };
 
-// ── HELPERS ─────────────────────────────────────────────────────────────────
-function uid() {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2);
-}
-
+// ── HELPERS ────────────────────────────────────────────────────────────────
+function uid() { return Date.now().toString(36)+Math.random().toString(36).slice(2); }
 function formatDate(ts) {
-  const d = new Date(ts);
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-    + ' • '
-    + d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+  try {
+    const d=new Date(ts);
+    return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})+' · '+d.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false});
+  } catch { return ''; }
 }
+function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
-function escHtml(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
-
-function avatarHTML(p, cls = 'avatar-md') {
+function makeAvatarEl(p, cls) {
+  const wrap = document.createElement('div');
+  wrap.className = 'avatar '+(cls||'avatar-md');
   if (p && p.avatar) {
-    return `<div class="avatar ${cls}"><img src="${p.avatar}" alt="${escHtml(p.name)}"></div>`;
+    const img = document.createElement('img');
+    img.src = p.avatar; img.alt = p.name||''; wrap.appendChild(img);
+  } else {
+    wrap.classList.add('avatar-placeholder');
+    wrap.textContent = (p&&p.name) ? p.name.charAt(0).toUpperCase() : '?';
   }
-  const initials = (p && p.name) ? p.name.charAt(0).toUpperCase() : '?';
-  return `<div class="avatar avatar-placeholder ${cls}" style="font-size:14px;font-weight:700;color:var(--text-muted)">${initials}</div>`;
+  return wrap;
 }
 
-function showToast(msg) {
-  const wrap = document.getElementById('toastContainer');
-  const el = document.createElement('div');
-  el.className = 'toast';
-  el.textContent = msg;
-  wrap.appendChild(el);
-  setTimeout(() => {
-    el.classList.add('out');
-    setTimeout(() => el.remove(), 300);
-  }, 2200);
+function showToast(msg, ms) {
+  const wrap = document.getElementById('toastContainer'); if(!wrap) return;
+  const el = document.createElement('div'); el.className='toast'; el.textContent=msg; wrap.appendChild(el);
+  setTimeout(()=>{ el.classList.add('out'); setTimeout(()=>el.remove(),350); }, ms||2400);
+}
+function showLoading(msg) {
+  let el = document.getElementById('loadingOverlay');
+  if (!el) { el=document.createElement('div'); el.id='loadingOverlay'; el.innerHTML='<div class="spinner"></div><div class="loading-label"></div>'; document.body.appendChild(el); }
+  el.querySelector('.loading-label').textContent = msg||''; el.style.display='flex';
+}
+function hideLoading() { const el=document.getElementById('loadingOverlay'); if(el) el.style.display='none'; }
+function closeAllMenus() { document.querySelectorAll('.dropdown-menu.open').forEach(m=>m.classList.remove('open')); activeMenu=null; }
+
+// ── IMAGE COMPRESSION ───────────────────────────────────────────────────────
+function compressImage(file) {
+  return new Promise((resolve, reject) => {
+    if (!file||!file.type.startsWith('image/')) return reject(new Error('Not an image'));
+    const reader = new FileReader();
+    reader.onerror = ()=>reject(new Error('File read failed'));
+    reader.onload = ev => {
+      const img = new Image();
+      img.onerror = ()=>reject(new Error('Could not decode image'));
+      img.onload = () => {
+        try {
+          let w=img.width, h=img.height;
+          if (w>MAX_IMG_PX||h>MAX_IMG_PX) {
+            if(w>=h){h=Math.round(h/w*MAX_IMG_PX);w=MAX_IMG_PX;}
+            else{w=Math.round(w/h*MAX_IMG_PX);h=MAX_IMG_PX;}
+          }
+          const c=document.createElement('canvas'); c.width=w; c.height=h;
+          c.getContext('2d').drawImage(img,0,0,w,h);
+          let data=c.toDataURL('image/jpeg',IMG_QUALITY);
+          if(data.length>700000) data=c.toDataURL('image/jpeg',0.6);
+          if(data.length>450000){
+            const c2=document.createElement('canvas'); c2.width=Math.round(w/2); c2.height=Math.round(h/2);
+            c2.getContext('2d').drawImage(c,0,0,c2.width,c2.height);
+            data=c2.toDataURL('image/jpeg',0.7);
+          }
+          resolve(data);
+        } catch(e){reject(e);}
+      };
+      img.src=ev.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
-function closeAllMenus() {
-  document.querySelectorAll('.dropdown-menu.open').forEach(m => m.classList.remove('open'));
-  activeMenu = null;
-}
-
-// ── ONBOARDING ──────────────────────────────────────────────────────────────
+// ── ONBOARDING ─────────────────────────────────────────────────────────────
 function initOnboarding() {
-  const onboarding = document.getElementById('onboarding');
-  const nameInput  = document.getElementById('ob-name');
-  const handleInput= document.getElementById('ob-handle');
-  const avatarInput= document.getElementById('ob-avatar-input');
-  const avatarPreview = document.getElementById('ob-avatar-preview');
-  const btnStart   = document.getElementById('btn-start');
+  const nameInput=document.getElementById('ob-name');
+  const handleInput=document.getElementById('ob-handle');
+  const avatarInput=document.getElementById('ob-avatar-input');
+  const avatarWrap=document.getElementById('ob-avatar-preview');
+  const btnStart=document.getElementById('btn-start');
+  let avatarData=null;
 
-  let avatarData = null;
+  document.getElementById('ob-avatar-area').addEventListener('click',()=>avatarInput.click());
 
-  document.getElementById('ob-avatar-area').addEventListener('click', () => avatarInput.click());
-
-  avatarInput.addEventListener('change', e => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => {
-      avatarData = ev.target.result;
-      avatarPreview.innerHTML = `<img src="${avatarData}" alt="Avatar">`;
-    };
-    reader.readAsDataURL(file);
+  avatarInput.addEventListener('change', async e=>{
+    const file=e.target.files[0]; avatarInput.value=''; if(!file) return;
+    try { showLoading('Processing photo…'); avatarData=await compressImage(file); avatarWrap.innerHTML=''; const img=document.createElement('img'); img.src=avatarData; img.alt='Preview'; avatarWrap.appendChild(img); }
+    catch(err){ showToast('Photo error: '+err.message); avatarData=null; }
+    finally{ hideLoading(); }
   });
 
-  // Auto-prefix @ on handle
-  handleInput.addEventListener('input', () => {
-    let v = handleInput.value;
-    if (v && !v.startsWith('@')) {
-      handleInput.value = '@' + v;
-    }
+  handleInput.addEventListener('input',()=>{
+    const v=handleInput.value;
+    if(v&&!v.startsWith('@')){ const p=handleInput.selectionStart+1; handleInput.value='@'+v; handleInput.setSelectionRange(p,p); }
   });
+  nameInput.addEventListener('keydown',e=>{ if(e.key==='Enter') handleInput.focus(); });
+  handleInput.addEventListener('keydown',e=>{ if(e.key==='Enter') btnStart.click(); });
 
-  btnStart.addEventListener('click', () => {
-    const name   = nameInput.value.trim();
-    let   handle = handleInput.value.trim();
-    if (!name) { showToast('Please enter your name'); return; }
-    if (!handle || handle === '@') { showToast('Please enter a username'); return; }
-    if (!handle.startsWith('@')) handle = '@' + handle;
-
-    profile = { name, handle, avatar: avatarData };
-    store.setProfile(profile);
-
-    onboarding.classList.add('hidden');
-    document.getElementById('app').classList.remove('hidden');
-    renderProfile();
-    renderFeed();
+  btnStart.addEventListener('click',()=>{
+    const name=nameInput.value.trim(); let handle=handleInput.value.trim();
+    if(!name){showToast('Enter your name');return;}
+    if(!handle||handle==='@'){showToast('Enter a username');return;}
+    if(!handle.startsWith('@')) handle='@'+handle;
+    handle='@'+handle.slice(1).replace(/[^A-Za-z0-9_]/g,'_').slice(0,25);
+    profile={name:name.slice(0,60),handle,avatar:avatarData};
+    if(!store.setProfile(profile)) return;
+    document.getElementById('onboarding').style.display='none';
+    showApp();
   });
 }
 
-// ── PROFILE RENDER ──────────────────────────────────────────────────────────
+// ── SHOW APP ──────────────────────────────────────────────────────────────
+function showApp() {
+  const app=document.getElementById('app');
+  app.style.display='flex';
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{ app.style.opacity='1'; }));
+  renderProfile(); renderFeed();
+}
+
+// ── PROFILE ───────────────────────────────────────────────────────────────
 function renderProfile() {
-  if (!profile) return;
-  document.getElementById('sidebar-name').textContent   = profile.name;
-  document.getElementById('sidebar-handle').textContent = profile.handle;
-  document.getElementById('sidebar-avatar').innerHTML   = avatarHTML(profile, 'avatar-sm');
-  document.getElementById('composer-avatar').innerHTML  = avatarHTML(profile, 'avatar-md');
-
-  const stat = document.getElementById('stat-handle');
-  if (stat) stat.textContent = profile.handle;
-  const statName = document.getElementById('stat-name');
-  if (statName) statName.textContent = profile.name;
+  if(!profile) return;
+  const set=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=v||'';};
+  set('sidebar-name',profile.name); set('sidebar-handle',profile.handle);
+  set('stat-handle',profile.handle); set('stat-name',profile.name);
+  const setAv=(id,cls)=>{const c=document.getElementById(id);if(!c)return;c.innerHTML='';c.appendChild(makeAvatarEl(profile,cls));};
+  setAv('sidebar-avatar','avatar-sm'); setAv('composer-avatar','avatar-md');
 }
 
-// ── COMPOSER ────────────────────────────────────────────────────────────────
+// ── COMPOSER ──────────────────────────────────────────────────────────────
 function initComposer() {
-  const textarea  = document.getElementById('post-text');
-  const charCount = document.getElementById('char-count');
-  const btnPost   = document.getElementById('btn-post');
-  const imgInput  = document.getElementById('img-input');
-  const imgPreviewWrap = document.getElementById('img-preview-wrap');
-  const imgPreviewEl   = document.getElementById('img-preview');
-  const removeImgBtn   = document.getElementById('remove-img');
+  const textarea=document.getElementById('post-text');
+  const charCount=document.getElementById('char-count');
+  const btnPost=document.getElementById('btn-post');
+  const imgInput=document.getElementById('img-input');
+  const imgWrap=document.getElementById('img-preview-wrap');
+  const imgEl=document.getElementById('img-preview');
 
-  textarea.addEventListener('input', () => {
-    const len = textarea.value.length;
-    const remaining = MAX_CHARS - len;
-    charCount.textContent = remaining;
-    charCount.parentElement.className = 'char-counter'
-      + (remaining < 20 ? ' warning' : '')
-      + (remaining < 0  ? ' over'    : '');
-    btnPost.disabled = (len === 0 && !composerImage) || remaining < 0;
+  function syncCounter() {
+    const rem=MAX_CHARS-textarea.value.length;
+    charCount.textContent=rem;
+    const bar=charCount.closest('.char-counter');
+    bar.classList.toggle('warning',rem<20&&rem>=0);
+    bar.classList.toggle('over',rem<0);
+    btnPost.disabled=(!textarea.value.trim()&&!composerImage)||rem<0;
+  }
+
+  textarea.addEventListener('input',()=>{ syncCounter(); textarea.style.height='auto'; textarea.style.height=Math.min(textarea.scrollHeight,400)+'px'; });
+  document.getElementById('btn-img').addEventListener('click',()=>imgInput.click());
+
+  imgInput.addEventListener('change',async e=>{
+    const file=e.target.files[0]; imgInput.value=''; if(!file) return;
+    try{ showLoading('Compressing…'); composerImage=await compressImage(file); imgEl.src=composerImage; imgWrap.style.display='block'; btnPost.disabled=false; }
+    catch(err){ showToast('Image error: '+err.message); composerImage=null; }
+    finally{ hideLoading(); }
   });
 
-  document.getElementById('btn-img').addEventListener('click', () => imgInput.click());
-
-  imgInput.addEventListener('change', e => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => {
-      composerImage = ev.target.result;
-      imgPreviewEl.src = composerImage;
-      imgPreviewWrap.style.display = 'block';
-      btnPost.disabled = false;
-    };
-    reader.readAsDataURL(file);
-    imgInput.value = '';
-  });
-
-  removeImgBtn.addEventListener('click', () => {
-    composerImage = null;
-    imgPreviewWrap.style.display = 'none';
-    imgPreviewEl.src = '';
-    if (!textarea.value.trim()) btnPost.disabled = true;
-  });
-
-  btnPost.addEventListener('click', submitPost);
-
-  textarea.addEventListener('keydown', e => {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') submitPost();
-  });
+  document.getElementById('remove-img').addEventListener('click',()=>{ composerImage=null; imgWrap.style.display='none'; imgEl.src=''; syncCounter(); });
+  btnPost.addEventListener('click',submitPost);
+  textarea.addEventListener('keydown',e=>{ if((e.ctrlKey||e.metaKey)&&e.key==='Enter') submitPost(); });
 }
 
 function submitPost() {
-  const textarea = document.getElementById('post-text');
-  const text = textarea.value.trim();
-  if (!text && !composerImage) return;
-  if (text.length > MAX_CHARS) return;
+  const textarea=document.getElementById('post-text');
+  const text=textarea.value.trim();
+  if(!text&&!composerImage) return;
+  if(text.length>MAX_CHARS){showToast('Post too long');return;}
 
-  const post = {
-    id: uid(),
-    text,
-    image: composerImage,
-    ts: Date.now(),
-  };
-
-  posts.unshift(post);
+  const post={id:uid(),text,image:composerImage,ts:Date.now()};
+  posts.unshift(post); if(posts.length>MAX_POSTS) posts.length=MAX_POSTS;
   store.setPosts(posts);
 
-  textarea.value = '';
-  composerImage = null;
-  document.getElementById('img-preview-wrap').style.display = 'none';
-  document.getElementById('img-preview').src = '';
-  document.getElementById('char-count').textContent = MAX_CHARS;
-  document.getElementById('char-count').parentElement.className = 'char-counter';
-  document.getElementById('btn-post').disabled = true;
+  textarea.value=''; textarea.style.height=''; composerImage=null;
+  document.getElementById('img-preview-wrap').style.display='none';
+  document.getElementById('img-preview').src='';
+  document.getElementById('char-count').textContent=MAX_CHARS;
+  const bar=document.getElementById('char-count').closest('.char-counter');
+  bar.classList.remove('warning','over');
+  document.getElementById('btn-post').disabled=true;
 
-  prependPost(post);
-  updateStats();
-  showToast('Posted!');
+  prependPostToDOM(post); updateStats(); showToast('Posted ✓');
 }
 
-// ── FEED ────────────────────────────────────────────────────────────────────
+// ── FEED ──────────────────────────────────────────────────────────────────
 function renderFeed() {
-  const feed = document.getElementById('feed');
-  feed.innerHTML = '';
-
-  if (posts.length === 0) {
-    feed.innerHTML = `
-      <div class="empty-state">
-        <div class="empty-state-icon">✦</div>
-        <div class="empty-state-title">Nothing here yet</div>
-        <div class="empty-state-sub">Write something and post it.<br>Only you will see it.</div>
-      </div>`;
-    return;
+  const feed=document.getElementById('feed'); feed.innerHTML='';
+  if(!posts.length){
+    const div=document.createElement('div'); div.className='empty-state';
+    div.innerHTML='<div class="empty-state-icon">✦</div><div class="empty-state-title">Nothing here yet</div><div class="empty-state-sub">Write something — only you will see it.</div>';
+    feed.appendChild(div); return;
   }
-
-  posts.forEach(p => feed.appendChild(buildPostEl(p)));
-  updateStats();
+  const frag=document.createDocumentFragment();
+  posts.forEach(p=>frag.appendChild(buildPostEl(p)));
+  feed.appendChild(frag); updateStats();
 }
 
-function prependPost(post) {
-  const feed = document.getElementById('feed');
-  const empty = feed.querySelector('.empty-state');
-  if (empty) empty.remove();
-  feed.insertBefore(buildPostEl(post), feed.firstChild);
-  updateStats();
+function prependPostToDOM(post) {
+  const feed=document.getElementById('feed');
+  const empty=feed.querySelector('.empty-state'); if(empty) empty.remove();
+  feed.insertBefore(buildPostEl(post),feed.firstChild); updateStats();
 }
 
 function buildPostEl(post) {
-  const el = document.createElement('article');
-  el.className = 'post';
-  el.dataset.id = post.id;
+  const el=document.createElement('article'); el.className='post'; el.dataset.id=post.id;
+  el.appendChild(makeAvatarEl(profile,'avatar-md'));
 
-  const imageBlock = post.image
-    ? `<div class="post-image"><img src="${post.image}" alt="Post image" loading="lazy"></div>`
-    : '';
+  const content=document.createElement('div'); content.className='post-content';
+  const header=document.createElement('div'); header.className='post-header';
+  header.innerHTML=`<span class="post-name">${escHtml(profile.name)}</span><span class="post-handle">${escHtml(profile.handle)}</span><span class="post-dot">·</span><span class="post-date">${escHtml(formatDate(post.ts))}</span>`;
+  content.appendChild(header);
 
-  el.innerHTML = `
-    ${avatarHTML(profile, 'avatar-md')}
-    <div class="post-content">
-      <div class="post-header">
-        <span class="post-name">${escHtml(profile.name)}</span>
-        <span class="post-handle">${escHtml(profile.handle)}</span>
-        <span class="post-dot">·</span>
-        <span class="post-date">${formatDate(post.ts)}</span>
-      </div>
-      ${post.text ? `<p class="post-text">${escHtml(post.text)}</p>` : ''}
-      ${imageBlock}
-    </div>
-    <div class="post-menu-wrap">
-      <button class="menu-trigger" title="More options" aria-label="Post options">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-          <circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/>
-        </svg>
-      </button>
-      <div class="dropdown-menu">
-        <button class="menu-item danger delete-btn">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>
-          </svg>
-          Delete post
-        </button>
-      </div>
-    </div>`;
+  if(post.text){const p=document.createElement('p');p.className='post-text';p.textContent=post.text;content.appendChild(p);}
+  if(post.image){
+    const iw=document.createElement('div');iw.className='post-image';
+    const img=document.createElement('img');img.loading='lazy';img.alt='Post image';img.src=post.image;
+    img.onerror=()=>iw.remove(); iw.appendChild(img); content.appendChild(iw);
+  }
+  el.appendChild(content);
 
-  const trigger = el.querySelector('.menu-trigger');
-  const menu    = el.querySelector('.dropdown-menu');
+  const menuWrap=document.createElement('div'); menuWrap.className='post-menu-wrap';
+  const trigger=document.createElement('button'); trigger.className='menu-trigger'; trigger.setAttribute('aria-label','More options');
+  trigger.innerHTML='<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>';
+  const menu=document.createElement('div'); menu.className='dropdown-menu';
+  const delBtn=document.createElement('button'); delBtn.className='menu-item danger';
+  delBtn.innerHTML='<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg> Delete post';
+  menu.appendChild(delBtn); menuWrap.appendChild(trigger); menuWrap.appendChild(menu); el.appendChild(menuWrap);
 
-  trigger.addEventListener('click', e => {
+  trigger.addEventListener('click',e=>{
     e.stopPropagation();
-    if (menu.classList.contains('open')) {
-      menu.classList.remove('open');
-      activeMenu = null;
-    } else {
-      closeAllMenus();
-      menu.classList.add('open');
-      activeMenu = menu;
-    }
+    const isOpen=menu.classList.contains('open'); closeAllMenus();
+    if(!isOpen){menu.classList.add('open');activeMenu=menu;}
   });
-
-  el.querySelector('.delete-btn').addEventListener('click', e => {
-    e.stopPropagation();
-    closeAllMenus();
-    confirmDelete(post.id, el);
-  });
-
+  delBtn.addEventListener('click',e=>{e.stopPropagation();closeAllMenus();confirmDelete(post.id,el);});
   return el;
 }
 
-// ── DELETE ───────────────────────────────────────────────────────────────────
-function confirmDelete(postId, el) {
-  const overlay = document.createElement('div');
-  overlay.className = 'confirm-overlay';
-  overlay.innerHTML = `
-    <div class="confirm-card">
-      <div class="confirm-title">Delete post?</div>
-      <div class="confirm-body">This will be removed from your local feed permanently.</div>
-      <div class="confirm-actions">
-        <button class="btn-cancel">Cancel</button>
-        <button class="btn-confirm-delete">Delete</button>
-      </div>
-    </div>`;
-
+// ── DELETE ────────────────────────────────────────────────────────────────
+function confirmDelete(postId,el) {
+  const overlay=document.createElement('div'); overlay.className='confirm-overlay';
+  overlay.innerHTML='<div class="confirm-card"><div class="confirm-title">Delete post?</div><div class="confirm-body">Permanently removed from your device.</div><div class="confirm-actions"><button class="btn-cancel">Cancel</button><button class="btn-confirm-delete">Delete</button></div></div>';
   document.body.appendChild(overlay);
-
-  overlay.querySelector('.btn-cancel').addEventListener('click', () => overlay.remove());
-  overlay.querySelector('.btn-confirm-delete').addEventListener('click', () => {
-    posts = posts.filter(p => p.id !== postId);
-    store.setPosts(posts);
-    el.style.transition = 'opacity 0.2s, transform 0.2s';
-    el.style.opacity = '0';
-    el.style.transform = 'translateX(20px)';
-    setTimeout(() => {
-      el.remove();
-      if (posts.length === 0) renderFeed();
-      updateStats();
-    }, 200);
-    overlay.remove();
-    showToast('Post deleted');
-  });
-
-  overlay.addEventListener('click', e => {
-    if (e.target === overlay) overlay.remove();
+  const onKey=e=>{if(e.key==='Escape')dismiss();};
+  const dismiss=()=>{overlay.remove();document.removeEventListener('keydown',onKey);};
+  document.addEventListener('keydown',onKey);
+  overlay.querySelector('.btn-cancel').addEventListener('click',dismiss);
+  overlay.addEventListener('click',e=>{if(e.target===overlay)dismiss();});
+  overlay.querySelector('.btn-confirm-delete').addEventListener('click',()=>{
+    posts=posts.filter(p=>p.id!==postId); store.setPosts(posts);
+    el.style.transition='opacity .2s,transform .2s'; el.style.opacity='0'; el.style.transform='translateX(20px)';
+    setTimeout(()=>{el.remove();if(!document.getElementById('feed').children.length)renderFeed();updateStats();},220);
+    dismiss(); showToast('Post deleted');
   });
 }
 
-// ── STATS ─────────────────────────────────────────────────────────────────
-function updateStats() {
-  const el = document.getElementById('stat-posts');
-  if (el) el.textContent = posts.length;
-}
+function updateStats(){const el=document.getElementById('stat-posts');if(el)el.textContent=posts.length;}
 
-// ── GLOBAL CLICK ─────────────────────────────────────────────────────────
-document.addEventListener('click', e => {
-  if (activeMenu && !activeMenu.contains(e.target)) {
-    closeAllMenus();
-  }
-});
+document.addEventListener('click',e=>{if(activeMenu){const w=activeMenu.closest('.post-menu-wrap');if(w&&!w.contains(e.target))closeAllMenus();}});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeAllMenus();});
 
-// ── PWA INSTALL BUTTON ────────────────────────────────────────────────────
-let deferredPrompt = null;
+let deferredPrompt=null;
+window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;const b=document.getElementById('install-btn');if(b)b.style.display='flex';});
+window.addEventListener('appinstalled',()=>{const b=document.getElementById('install-btn');if(b)b.style.display='none';deferredPrompt=null;showToast('H installed!');});
 
-window.addEventListener('beforeinstallprompt', e => {
-  e.preventDefault();
-  deferredPrompt = e;
-  const btn = document.getElementById('install-btn');
-  if (btn) { btn.style.display = 'flex'; }
-});
-
-window.addEventListener('appinstalled', () => {
-  const btn = document.getElementById('install-btn');
-  if (btn) btn.style.display = 'none';
-  showToast('H installed successfully!');
-});
-
-// ── INIT ──────────────────────────────────────────────────────────────────
 function init() {
-  // Register SW
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('./service-worker.js')
-      .catch(err => console.warn('SW error:', err));
+  if('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js').catch(()=>{});
+  profile=store.getProfile(); posts=store.getPosts();
+  if(!Array.isArray(posts)) posts=[];
+
+  const app=document.getElementById('app');
+  app.style.cssText='display:none;opacity:0;transition:opacity 0.35s ease;';
+
+  if(profile&&profile.name&&profile.handle){
+    document.getElementById('onboarding').style.display='none';
+    showApp();
   }
+  initOnboarding(); initComposer();
 
-  profile = store.getProfile();
-  posts   = store.getPosts();
-
-  const onboarding = document.getElementById('onboarding');
-  const app        = document.getElementById('app');
-
-  if (profile) {
-    onboarding.classList.add('hidden');
-    app.classList.remove('hidden');
-    renderProfile();
-    renderFeed();
-  } else {
-    app.classList.add('hidden');
-  }
-
-  initOnboarding();
-  initComposer();
-
-  // Install btn
-  const installBtn = document.getElementById('install-btn');
-  if (installBtn) {
-    installBtn.addEventListener('click', async () => {
-      if (!deferredPrompt) return;
-      deferredPrompt.prompt();
-      const { outcome } = await deferredPrompt.userChoice;
-      deferredPrompt = null;
-      if (outcome === 'accepted') showToast('Installing H…');
+  const installBtn=document.getElementById('install-btn');
+  if(installBtn){
+    installBtn.addEventListener('click',async()=>{
+      if(!deferredPrompt){showToast('Open in browser to install');return;}
+      try{await deferredPrompt.prompt();const{outcome}=await deferredPrompt.userChoice;deferredPrompt=null;if(outcome==='accepted')showToast('Installing…');}catch{}
     });
   }
 }
-
-document.addEventListener('DOMContentLoaded', init);
+document.addEventListener('DOMContentLoaded',init);
